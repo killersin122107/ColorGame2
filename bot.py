@@ -6,27 +6,31 @@ import json
 import os
 from itertools import combinations
 import re 
+import asyncio # Imported for better asynchronous practice, though not strictly needed for this specific logic
 
 # --- Configuration ---
-# Telegram Bot Token provided by the user
-TOKEN = '8103644321:AAFDyGgp2G-0TXDkMV8iXY4VuGg5iYY7H-M' 
+# BEST PRACTICE: Load TOKEN from environment variable for security.
+# Fallback is only for quick testing.
+TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8103644321:AAFDyGgp2G-0TXDkMV8iXY4VuGg5iYY7H-M') 
 DATA_FILE = 'data.json'
 SIX_COLORS = ['🔵 Blue', '🔴 Red', '🟢 Green', '🟡 Yellow', '⚪ White', '🌸 Pink']
+ROLLS_PER_GAME = 3 
 BUTTON_TEXT = "View Detailed Report"
-PREDICT_BUTTON = "➡️ Log Next Roll / Predict" 
 
 # --- State Management ---
-# Tracks the user's current roll for the multi-step process: {user_id: [color_1, color_2, color_3]}
+# Tracks the user's current roll: {user_id: [color_1, color_2, color_3]}
 USER_ROLL_STATE = {}
 
 # --- Data Management Functions ---
 
 def load_data():
-    """Loads history, counts, and configuration from the JSON file."""
+    """Loads history, counts, and configuration (including URL and credentials) from the JSON file."""
     default_data = {
         "history": [],
         "color_counts": {color: 0 for color in SIX_COLORS},
+        # Store configuration data here
         "config": {
+            # --- DEFAULT URL ---
             "analysis_url_base": "https://queenking.ph/game/play/STUDIO-CGM-CGM002-by-we", 
             "username": "09925345945", 
             "password": "Shiwashi21"    
@@ -37,10 +41,11 @@ def load_data():
     try:
         with open(DATA_FILE, 'r') as f:
             data = json.load(f)
+            # Ensure all necessary keys exist (for old data files)
             data.setdefault('config', default_data['config'])
+            data.setdefault('color_counts', default_data['color_counts'])
             for key in default_data['config']:
                 data['config'].setdefault(key, default_data['config'][key])
-            data.setdefault('color_counts', default_data['color_counts'])
             for color in SIX_COLORS:
                 data['color_counts'].setdefault(color, 0)
             return data
@@ -62,7 +67,7 @@ def update_data_with_roll(rolled_colors, data):
         data['color_counts'][color] += 1
     save_data(data)
 
-# --- Analysis & Prediction Functions (Unchanged from previous versions) ---
+# --- Analysis Functions (Unchanged) ---
 
 def create_color_keyboard(roll_number):
     """Creates the inline keyboard with color buttons."""
@@ -90,6 +95,7 @@ def analyze_patterns(data):
     least_likely = sorted_probs[0]
     most_likely = sorted_probs[-1]
     
+    # Format all counts for a clearer view
     count_details = "\n".join([f"- {color}: {count} hits" for color, count in sorted(data['color_counts'].items())])
 
     full_history_msg = (
@@ -148,16 +154,31 @@ def predict_combinations(data):
             pair_counts[sorted_combo] = pair_counts.get(sorted_combo, 0) + 1
 
     if not pair_counts:
-        color_B, color_C = most_frequent_color, most_frequent_color
+          color_B, color_C = most_frequent_color, most_frequent_color
     else:
+        # Find the most frequent pair
         most_frequent_pair = max(pair_counts, key=pair_counts.get)
         color_B, color_C = most_frequent_pair
         
+    # Prediction strategies based on frequent individual color and frequent pair
+    
     # P1: Mix - Most Frequent Pair + Most Frequent Individual Color
-    prediction_1 = sorted([color_B, color_C, most_frequent_color])
+    prediction_1 = [color_B, color_C, most_frequent_color]
+    random.shuffle(prediction_1) # Shuffle for less predictable display
     
     # P2: Double - Most Frequent Pair + One color from the pair repeated
-    prediction_2 = sorted([color_B, color_C, color_B if color_B != color_C else SIX_COLORS[0]]) 
+    # Ensure prediction_2 has 3 elements, even if B==C
+    prediction_2_base = [color_B, color_C] 
+    if color_B == color_C:
+        # If the most frequent pair is actually a double of the same color (e.g., Red, Red), 
+        # use the next most frequent color or a default for the third.
+        sorted_counts = sorted(color_counts.items(), key=lambda item: item[1], reverse=True)
+        third_color = sorted_counts[1][0] if len(sorted_counts) > 1 else SIX_COLORS[0]
+        prediction_2 = [color_B, color_C, third_color]
+    else:
+        prediction_2 = [color_B, color_C, color_B] # Double one of the pair members
+        
+    random.shuffle(prediction_2) 
     
     # P3: Jackpot - Triple Most Frequent Color
     prediction_3 = [most_frequent_color, most_frequent_color, most_frequent_color]
@@ -201,24 +222,9 @@ def format_last_15_rolls(data):
 
 # --- Command Handlers ---
 
-async def start(update, context):
-    """Sends a greeting message with a full list of commands."""
-    welcome_message = (
-        "Welcome! I analyze the Philippine Color Game 3-Dice Roll using statistics.\n\n"
-        "### 🕹️ **Game Commands (Quickest Options First)**\n"
-        "• **/log [C1] [C2] [C3]**: **(FASTEST)** Log all three colors at once. *e.g., /log Blue Green Red*\n"
-        "• **/roll** or **/predict**: Start the 3-step button-selection process.\n"
-        "• **/analyze**: View the full statistical breakdown, last 15 rolls, and the best prediction.\n\n"
-        "### ⚙️ **Administrative Commands**\n"
-        "• **/setbaseurl [url]**: Set the base URL for the external analysis report.\n"
-        "• **/setcreds [user] [pass]**: Set the username and password.\n"
-        "• **/reset**: Clear all logged history (DANGEROUS!)."
-    )
-    await update.message.reply_text(welcome_message, parse_mode=constants.ParseMode.MARKDOWN)
-
 async def reset_history(update, context):
     """Resets all recorded history and counts."""
-    initial_data = load_data() 
+    initial_data = load_data() # Load to preserve config
     initial_data['history'] = []
     initial_data['color_counts'] = {color: 0 for color in SIX_COLORS}
     save_data(initial_data)
@@ -227,8 +233,25 @@ async def reset_history(update, context):
         parse_mode=constants.ParseMode.MARKDOWN
     )
 
+async def start(update, context):
+    """Sends a greeting message with a full list of commands."""
+    welcome_message = (
+        "Welcome! I analyze the Philippine Color Game 3-Dice Roll using statistics.\n\n"
+        "### 🕹️ **Game Commands**\n"
+        "Use these commands to input results and get predictions:\n"
+        "• **/roll** or **/predict**: Start the button-selection process to log a new result and get the next prediction.\n"
+        "• **/analyze**: View the full statistical breakdown, last 15 rolls, and the best predicted combination.\n\n"
+        "### ⚙️ **Administrative Commands**\n"
+        "Use these to manage data and links:\n"
+        "• **/setbaseurl [url]**: Set the base URL for the external analysis report.\n"
+        "• **/setcreds [user] [pass]**: Set the username and password used to access the analysis link.\n"
+        "• **/reset**: Clear all logged history and statistics (DANGEROUS!)."
+    )
+    await update.message.reply_text(welcome_message, parse_mode=constants.ParseMode.MARKDOWN)
+
 async def set_analysis_base_url(update, context):
     """Allows the user to set a new base external URL for the /analyze button."""
+    
     if not context.args:
         await update.message.reply_text(
             "⚠️ Please provide the base URL after the command.\n\n"
@@ -238,18 +261,21 @@ async def set_analysis_base_url(update, context):
         return
 
     new_base_url = context.args[0]
+        
     data = load_data()
     data['config']['analysis_url_base'] = new_base_url
     save_data(data)
     
     await update.message.reply_text(
         f"✅ **Analysis Base URL Updated!**\n"
-        f"The new base URL is: `{new_base_url}`.",
+        f"The new base URL is: `{new_base_url}`.\n"
+        f"This link will be used when you type **/analyze**.",
         parse_mode=constants.ParseMode.MARKDOWN
     )
 
 async def set_credentials(update, context):
     """Allows the user to set their username and password for the analysis URL."""
+    
     if len(context.args) != 2:
         await update.message.reply_text(
             "⚠️ Please provide both your **username** and **password**.\n\n"
@@ -260,6 +286,7 @@ async def set_credentials(update, context):
 
     username = context.args[0]
     password = context.args[1]
+    
     data = load_data()
     data['config']['username'] = username
     data['config']['password'] = password
@@ -267,81 +294,17 @@ async def set_credentials(update, context):
     
     await update.message.reply_text(
         f"✅ **Credentials Saved!**\n"
-        f"Username: `{username}`",
+        f"Username: `{username}`\n"
+        f"Your analysis link will now be generated with these credentials.",
         parse_mode=constants.ParseMode.MARKDOWN
     )
-
-# --- NEW QUICK LOGGING LOGIC ---
-
-def validate_colors(args):
-    """Validates if the three arguments provided are valid colors."""
-    valid_colors = [c.split()[1] for c in SIX_COLORS]
-    
-    if len(args) != 3:
-        return False, "⚠️ Please provide exactly **three** colors."
-
-    validated_colors = []
-    
-    for arg in args:
-        match = next((full_color for full_color in SIX_COLORS if arg.lower() == full_color.split()[1].lower()), None)
-        
-        if not match:
-            return False, f"❌ Invalid color: **{arg}**. Valid options are: {'/'.join(valid_colors)}."
-        
-        validated_colors.append(match) 
-        
-    return True, validated_colors
-
-
-async def log_quick_roll(update, context):
-    """Handles /log command: Logs a 3-color roll directly via command arguments and returns the prediction."""
-    
-    is_valid, result = validate_colors(context.args)
-
-    if not is_valid:
-        await update.message.reply_text(
-            f"{result}\n\nExample: **/log Blue Green Yellow**",
-            parse_mode=constants.ParseMode.MARKDOWN
-        )
-        return
-
-    rolled_colors = result
-    game_data = load_data()
-    update_data_with_roll(rolled_colors, game_data)
-    
-    roll_message = (
-        f"✅ **Quick Roll Logged!**\n"
-        f"**Logged Lineup:** {rolled_colors[0]} | {rolled_colors[1]} | {rolled_colors[2]}\n\n"
-    )
-    
-    individual_analysis = analyze_patterns(game_data)
-    coldness_analysis = find_coldest_color(game_data)
-    combination_analysis = predict_combinations(game_data)
-    
-    full_analysis_message = (
-        f"{roll_message}"
-        f"--- **Statistical Prediction for NEXT Roll** ---\n\n"
-        f"{individual_analysis}\n\n"
-        f"{coldness_analysis}\n"
-        f"{combination_analysis}"
-    )
-
-    predict_keyboard = [[InlineKeyboardButton(PREDICT_BUTTON, callback_data="command_predict")]]
-    predict_reply_markup = InlineKeyboardMarkup(predict_keyboard)
-    
-    await update.message.reply_text(
-        full_analysis_message,
-        reply_markup=predict_reply_markup,
-        parse_mode=constants.ParseMode.MARKDOWN
-    )
-
-# --- MULTI-STEP LOGIC ---
 
 async def start_roll(update, context):
-    """Starts the 3-dice color selection process via buttons (for /roll and /predict)."""
+    """Starts the 3-dice color selection process via buttons. This is used by both /roll and /predict."""
     user_id = update.effective_user.id
     
     USER_ROLL_STATE[user_id] = [None, None, None]
+    
     keyboard = create_color_keyboard(roll_number=1)
     
     await update.message.reply_text(
@@ -351,58 +314,67 @@ async def start_roll(update, context):
     )
 
 async def handle_color_callback(update, context):
-    """Handles color selection button clicks for the 3-step process."""
+    """Handles color selection button clicks and tracks state."""
     query = update.callback_query
-    await query.answer()
+    # Immediate answer to prevent loading spinner, ensures responsiveness
+    await query.answer() 
     
     user_id = query.from_user.id
     data = query.data.split('_')
     
     if len(data) != 3 or user_id not in USER_ROLL_STATE:
-        await query.edit_message_text("Error: Roll session timed out or invalid data. Use /roll to start again.")
+        await query.edit_message_text("Error: Roll session timed out or invalid data. Use /roll or /predict to start again.")
         return
 
     roll_number = int(data[1])
     selected_color = data[2] 
+    
+    # Map back to full color name (e.g., 'Blue' -> '🔵 Blue')
     full_color_name = next((c for c in SIX_COLORS if selected_color in c), None)
     
     USER_ROLL_STATE[user_id][roll_number - 1] = full_color_name
 
     if roll_number == 3:
-        # Final roll: save data, generate prediction, and add the quick re-roll button.
+        # Final roll, save data and generate prediction
         rolled_colors = USER_ROLL_STATE.pop(user_id)
         
         game_data = load_data()
         update_data_with_roll(rolled_colors, game_data)
         
-        roll_message = (
-            f"✅ **Roll Logged!**\n"
-            f"**Logged Lineup:** {rolled_colors[0]} | {rolled_colors[1]} | {rolled_colors[2]}\n\n"
-        )
-        
         individual_analysis = analyze_patterns(game_data)
         coldness_analysis = find_coldest_color(game_data)
         combination_analysis = predict_combinations(game_data)
-        
+
+        # 1. Extract the Best Prediction Summary (similar to /analyze)
+        best_prediction_summary = "Prediction not yet available (Need 10+ rolls)."
+        if len(game_data['history']) >= 10:
+            try:
+                # Safely extract the P1 prediction line from combination analysis
+                p1_line = next(line for line in combination_analysis.split('\n') if line.startswith('🥇 **P1 (Mix):**'))
+                # Clean up the string to just show the combination
+                best_prediction_summary = re.sub(r'🥇 \*\*P1 \(Mix\):\*\* `(.*?)`.*', r'\1', p1_line).strip()
+            except StopIteration:
+                pass 
+                
+        # 2. Consolidate the Final Response, prominently featuring the next prediction
         full_analysis_message = (
-            f"{roll_message}"
-            f"--- **Statistical Prediction for NEXT Roll** ---\n\n"
+            "✅ **Roll Logged!**\n"
+            f"**Logged Lineup:** {rolled_colors[0]} | {rolled_colors[1]} | {rolled_colors[2]}\n\n"
+            "--- **Statistical Prediction for NEXT Roll** ---\n"
+            f"🎯 **RECOMMENDED NEXT ROLL (P1):** `{best_prediction_summary}`\n\n"
+            
             f"{individual_analysis}\n\n"
             f"{coldness_analysis}\n"
-            f"{combination_analysis}"
+            f"{combination_analysis}" # This includes the P1/P2/P3 breakdown
         )
 
-        predict_keyboard = [[InlineKeyboardButton(PREDICT_BUTTON, callback_data="command_predict")]]
-        predict_reply_markup = InlineKeyboardMarkup(predict_keyboard)
-        
         await query.edit_message_text(
             full_analysis_message,
-            reply_markup=predict_reply_markup,
             parse_mode=constants.ParseMode.MARKDOWN
         )
         return
 
-    # Not the final roll: immediately prompt for the next die (zero delay)
+    # Not the final roll, prompt for the next die
     next_roll_number = roll_number + 1
     keyboard = create_color_keyboard(next_roll_number)
     
@@ -412,61 +384,57 @@ async def handle_color_callback(update, context):
         parse_mode=constants.ParseMode.MARKDOWN
     )
     
-async def handle_command_callback(update, context):
-    """Handles callback for in-line buttons that trigger commands (like /predict)."""
-    query = update.callback_query
-    await query.answer()
-    
-    command = query.data.split('_')[1]
-
-    if command == 'predict':
-        # Restart the multi-step rolling process (start_roll logic)
-        user_id = query.from_user.id
-        USER_ROLL_STATE[user_id] = [None, None, None]
-        keyboard = create_color_keyboard(roll_number=1)
-
-        await query.edit_message_text(
-            "🎲 **Roll 1 of 3:** Please select the color for the first die.",
-            reply_markup=keyboard,
-            parse_mode=constants.ParseMode.MARKDOWN
-        )
-
 async def get_analysis_only(update, context):
     """Allows the user to view the full analysis based on ALL history, and includes an external URL button."""
     
     data = load_data()
     
+    # Get configuration data
     base_url = data['config'].get('analysis_url_base', "https://www.example.com/report")
     username = data['config'].get('username', '')
     password = data['config'].get('password', '')
     
-    # CONSTRUCT THE AUTHENTICATED URL
+    # 1. CONSTRUCT THE AUTHENTICATED URL
     if username and password:
-        protocol_match = re.match(r"^(https?://|ftp://)", base_url)
-        if protocol_match:
-            protocol = protocol_match.group(0)
-            domain_path = base_url[len(protocol):]
-            analysis_url = f"{protocol}{username}:{password}@{domain_path}"
+        # Use regex to split only after the protocol to correctly insert credentials
+        if '://' in base_url:
+            protocol_match = re.match(r"^(https?://|ftp://)", base_url)
+            if protocol_match:
+                protocol = protocol_match.group(0)
+                domain_path = base_url[len(protocol):]
+                analysis_url = f"{protocol}{username}:{password}@{domain_path}"
+            else:
+                 # Fallback for unexpected URL formats
+                analysis_url = f"https://{username}:{password}@{base_url}"
         else:
+            # Fallback for URLs without explicit protocol
             analysis_url = f"https://{username}:{password}@{base_url}"
+        
         url_status = f"🔐 Link generated with saved credentials."
     else:
         analysis_url = base_url
         url_status = f"🔗 Link is using the base URL (credentials not set)."
 
+    # 2. Format and display the recorded history (Last 15 Rolls)
     history_display_15 = format_last_15_rolls(data)
+    
+    # 3. Perform all analyses
     individual_analysis = analyze_patterns(data)
     coldness_analysis = find_coldest_color(data)
     combination_analysis = predict_combinations(data)
 
+    # 4. Extract the Best Prediction Summary
     best_prediction_summary = "Prediction not yet available (Need 10+ rolls)."
     if len(data['history']) >= 10:
         try:
+            # Safely extract the P1 prediction line from combination analysis
             p1_line = next(line for line in combination_analysis.split('\n') if line.startswith('🥇 **P1 (Mix):**'))
+            # Clean up the string to just show the combination
             best_prediction_summary = re.sub(r'🥇 \*\*P1 \(Mix\):\*\* `(.*?)`.*', r'\1', p1_line).strip()
         except StopIteration:
             pass 
 
+    # 5. Consolidate message
     full_analysis_message = (
         f"{history_display_15}\n"
         f"--- **Best Prediction Summary** ---\n"
@@ -479,6 +447,7 @@ async def get_analysis_only(update, context):
         f"{url_status}"
     )
 
+    # 6. Create the Inline Keyboard button
     keyboard = [[InlineKeyboardButton(BUTTON_TEXT, url=analysis_url)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -492,24 +461,19 @@ async def get_analysis_only(update, context):
 
 def main():
     """Starts the bot."""
+    # Ensure data.json exists and is initialized with defaults
     if not os.path.exists(DATA_FILE):
         save_data(load_data())
     
+    # The ApplicationBuilder handles networking, using appropriate asynchronous calls
+    # for immediate request/response without introducing artificial delays.
     application = ApplicationBuilder().token(TOKEN).build()
 
     # Register handlers
     application.add_handler(CommandHandler("start", start))
-    
-    # 1. Quick Log (New)
-    application.add_handler(CommandHandler("log", log_quick_roll))
-    
-    # 2. Multi-Step Roll (Original)
     application.add_handler(CommandHandler("roll", start_roll))
     application.add_handler(CommandHandler("predict", start_roll))
-    application.add_handler(CallbackQueryHandler(handle_color_callback, pattern=r'^roll_\d+_[A-Za-z]+$'))
-    application.add_handler(CallbackQueryHandler(handle_command_callback, pattern=r'^command_[A-Za-z]+$'))
-    
-    # 3. Administrative Commands
+    application.add_handler(CallbackQueryHandler(handle_color_callback))
     application.add_handler(CommandHandler("analyze", get_analysis_only))
     application.add_handler(CommandHandler("setbaseurl", set_analysis_base_url)) 
     application.add_handler(CommandHandler("setcreds", set_credentials)) 
