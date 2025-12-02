@@ -6,7 +6,7 @@ import json
 import os
 from itertools import combinations
 import re 
-import asyncio # Library is asynchronous, so this import is good practice
+import asyncio 
 
 # --- Configuration & Security ---
 # Load TOKEN from environment variable for production (Best Practice). 
@@ -15,7 +15,7 @@ TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8103644321:AAFDyGgp2G-0TXDkMV8iXY4
 DATA_FILE = 'data.json'
 SIX_COLORS = ['🔵 Blue', '🔴 Red', '🟢 Green', '🟡 Yellow', '⚪ White', '🌸 Pink']
 ROLLS_PER_GAME = 3 
-BUTTON_TEXT = "View External Report" # Renamed for clarity on what the link does
+BUTTON_TEXT = "View External Report" 
 
 # --- State Management ---
 # Tracks the user's current roll: {user_id: [color_1, color_2, color_3]}
@@ -295,6 +295,7 @@ async def start_roll(update, context):
     
     keyboard = create_color_keyboard(roll_number=1)
     
+    # We use update.message.reply_text here as this is triggered by a command (/roll or /predict)
     await update.message.reply_text(
         "🎲 **Roll 1 of 3:** Please select the color for the first die.",
         reply_markup=keyboard,
@@ -310,7 +311,7 @@ async def start_roll_from_callback(update, context):
     USER_ROLL_STATE[user_id] = [None, None, None]
     keyboard = create_color_keyboard(roll_number=1)
     
-    # Edit the message to start the roll sequence
+    # Edit the previous analysis message to start the roll sequence
     await query.edit_message_text(
         "🎲 **Roll 1 of 3:** Please select the color for the first die.",
         reply_markup=keyboard,
@@ -326,9 +327,8 @@ async def handle_color_callback(update, context):
     user_id = query.from_user.id
     data = query.data.split('_')
     
-    # Check if this is a color selection callback
+    # Only proceed if this is a color roll callback and a session exists
     if data[0] != 'roll' or user_id not in USER_ROLL_STATE:
-        # If it's not a color roll callback (e.g., if it's "start_new_roll"), it's handled by another function.
         return 
 
     roll_number = int(data[1])
@@ -471,7 +471,7 @@ def main():
     if not os.path.exists(DATA_FILE):
         save_data(load_data())
     
-    # application.run_polling() handles the polling loop with no unnecessary delay
+    # The ApplicationBuilder handles the setup
     application = ApplicationBuilder().token(TOKEN).build()
 
     # Register command handlers
@@ -487,6 +487,7 @@ def main():
     # This handles the "Submit Next Roll" button from the analysis screens
     application.add_handler(CallbackQueryHandler(start_roll_from_callback, pattern="^start_new_roll$")) 
     # This handles all the individual color selection clicks (roll_1_color, roll_2_color, etc.)
+    # It must be placed after the specific pattern handler above.
     application.add_handler(CallbackQueryHandler(handle_color_callback)) 
 
     print("Color Dice Roll Predictor Bot is running... Press Ctrl+C to stop.")
