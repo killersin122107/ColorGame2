@@ -4,240 +4,366 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, constants
 import random
 import json
 import os
-import asyncio 
+import datetime 
 
 # --- Configuration & Constants ---
 
-# Use the token provided in the original request
 TOKEN = '8103644321:AAFDyGgp2G-0TXDkMV8iXY4VuGg5iYY7H-M' 
+NUM_DECKS = 6 
+LOG_FILE = 'blackjack_log.json' 
+START_GAME_COMMAND = 'startgame'
 
-# Blackjack Game Constants
-CARD_SUITS = ['♠️', '♥️', '♦️', '♣️']
+# Card sets for display and counting (we won't worry about suits for this manual input)
+CARD_RANK_KEYS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
 CARD_RANKS = {
     '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, 
     '8': 8, '9': 9, '10': 10, 'J': 10, 'Q': 10, 'K': 10, 
-    'A': 11 # Ace starts as 11, logic handles reducing it to 1
+    'A': 11 
+}
+HI_LO_VALUES = {
+    '2': 1, '3': 1, '4': 1, '5': 1, '6': 1, 
+    '7': 0, '8': 0, '9': 0, 
+    '10': -1, 'J': -1, 'Q': -1, 'K': -1, 'A': -1
 }
 
 # --- State Management ---
-# Tracks the current game state for each user: 
-# {user_id: {'player_hand': [card_str], 'dealer_hand': [card_str], 'game_over': bool}}
-GAME_STATE = {}
+# New structure for manual input and logging
+USER_INPUT_STATE = {}
+# {user_id: {
+#   'step': 'SELECTING_PLAYER_CARD_1', 
+#   'player_hand': [], 
+#   'dealer_hand': [], 
+#   'running_count': 0,
+#   'cards_logged': 0 # Total cards logged since start of shoe
+# }}
 
-# --- Game Logic Functions ---
+# --- Utility & Strategy Logic ---
 
-def create_deck():
-    """Creates a standard 52-card deck (list of card strings like '♥️A')."""
-    deck = []
-    for suit in CARD_SUITS:
-        for rank in CARD_RANKS.keys():
-            deck.append(f"{suit}{rank}")
-    random.shuffle(deck)
-    return deck
+def create_card_rank_keyboard():
+    """Creates the inline keyboard with card rank buttons."""
+    keyboard = []
+    # Row 1: A, 2, 3, 4
+    keyboard.append([InlineKeyboardButton(r, callback_data=f"rank_{r}") for r in ['A', '2', '3', '4']])
+    # Row 2: 5, 6, 7, 8
+    keyboard.append([InlineKeyboardButton(r, callback_data=f"rank_{r}") for r in ['5', '6', '7', '8']])
+    # Row 3: 9, 10, J, Q, K
+    keyboard.append([InlineKeyboardButton(r, callback_data=f"rank_{r}") for r in ['9', '10', 'J', 'Q', 'K']])
+    return InlineKeyboardMarkup(keyboard)
 
-def deal_card(deck):
-    """Deals one card from the deck."""
-    if not deck:
-        # If the deck runs out, create a new one (not strictly standard, but practical for bot)
-        deck = create_deck()
-    return deck.pop()
+def update_count(rank, current_count):
+    """Updates the running count based on the selected card rank."""
+    return current_count + HI_LO_VALUES.get(rank, 0)
 
 def get_hand_value(hand):
     """Calculates the total value of a hand, handling Aces (11 or 1)."""
     value = 0
     num_aces = 0
     
-    for card in hand:
-        rank = card[1:] # Get the rank part (e.g., 'A', '10')
-        card_rank_value = CARD_RANKS.get(rank, 0) # Fallback for two-digit rank '10'
-        
+    for card_rank in hand:
+        card_rank_value = CARD_RANKS.get(card_rank, 0)
         value += card_rank_value
-        if rank == 'A':
+        if card_rank == 'A':
             num_aces += 1
             
-    # Handle Aces: reduce value by 10 for each Ace until value is 21 or less
     while value > 21 and num_aces > 0:
         value -= 10
         num_aces -= 1
         
     return value
 
-def check_game_end(player_value, dealer_value, game_over):
-    """Determines the outcome of the game."""
-    if not game_over:
-        if player_value == 21:
-            return "Blackjack! 🎉 Player Wins!", True
-        elif player_value > 21:
-            return "💥 BUST! Player Loses.", True
-        return None, False
-
-    # If game_over is True (meaning the player chose STAND or the dealer finished)
-    if player_value > 21:
-        return "💥 BUST! Player Loses.", True
-    elif dealer_value > 21:
-        return "✅ Dealer Busts! Player Wins.", True
-    elif player_value > dealer_value:
-        return "🥳 Player Wins!", True
-    elif player_value < dealer_value:
-        return "😭 Player Loses.", True
+def calculate_true_count(running_count, cards_logged):
+    """Calculates True Count: Running Count / Remaining Decks."""
+    
+    # Total cards in the shoe initially
+    initial_cards = 52 * NUM_DECKS
+    
+    # Number of decks remaining
+    cards_remaining = initial_cards - cards_logged
+    if cards_remaining <= 52: # If less than one deck, it's the last deck
+        decks_remaining = 1.0
     else:
-        return "🤝 Push (Tie).", True
+        decks_remaining = cards_remaining / 52.0
+    
+    if decks_remaining < 0.25:
+        decks_remaining = 0.25 
+        
+    true_count = int(running_count / decks_remaining)
+    return true_count
 
-def get_hand_display(hand, is_dealer_first_card_hidden=False):
-    """Formats the hand for display, hiding the dealer's first card if needed."""
-    if is_dealer_first_card_hidden and len(hand) > 0:
-        # Display: [HIDDEN] [Card 2] (Value: ?)
-        visible_cards = hand[1:]
-        display = f"**[HIDDEN]** {' '.join(visible_cards)}"
-        # Display value only based on the visible card(s)
-        value = get_hand_value(visible_cards)
-        return display, f"Value: {value} + ?"
+# The recommendation function is the same as the previous version
+def recommend_action(player_hand, dealer_up_card, true_count):
+    """Provides the optimal action based on Basic Strategy and True Count."""
+    
+    player_value = get_hand_value(player_hand)
+    dealer_value = CARD_RANKS.get(dealer_up_card, 10)
+    
+    if player_value >= 17:
+        return "STAND (Always stand on 17+)"
+    if player_value <= 8:
+        return "HIT (Always hit on 8 or less)"
+    
+    # Simple Double Down logic on 11
+    if player_value == 11:
+        if 2 <= dealer_value <= 10 or dealer_up_card == 'A':
+             return "DOUBLE DOWN (Optimal vs. Dealer 2-10, A)"
+        return "HIT"
+
+    # Player Hand: 12-16 (Stiff hands)
+    if 12 <= player_value <= 16:
+        if 2 <= dealer_value <= 6:
+            # Card Counting Deviation Check for 16 vs 10
+            if player_value == 16 and dealer_value == 10 and true_count >= 0: 
+                return "STAND (Count favors standing!)"
+            return "STAND (Dealer is stiff)"
+        
+        return "HIT (Dealer is strong)"
+        
+    return "HIT" # Default catch-all
+
+def log_hand_result(user_id, state, outcome_message):
+    """Logs the final details of a completed hand to a JSON file."""
+    
+    player_value = get_hand_value(state['player_hand'])
+    dealer_value = get_hand_value(state['dealer_hand'])
+    
+    log_entry = {
+        'timestamp': datetime.datetime.now().isoformat(),
+        'user_id': user_id,
+        'initial_true_count': calculate_true_count(state['running_count'], state['cards_logged']),
+        'player_final_hand': state['player_hand'],
+        'dealer_final_hand': state['dealer_hand'],
+        'player_final_value': player_value,
+        'dealer_final_value': dealer_value,
+        'game_outcome': outcome_message,
+        'final_running_count': state['running_count']
+    }
+    
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, 'r') as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                data = []
     else:
-        # Display all cards (Value: X)
-        display = ' '.join(hand)
-        value = get_hand_value(hand)
-        return display, f"Value: **{value}**"
+        data = []
 
-def create_game_keyboard(can_double_down=False):
-    """Creates the inline keyboard for game actions."""
-    keyboard = [
-        [InlineKeyboardButton("➕ HIT", callback_data="action_hit"),
-         InlineKeyboardButton("🛑 STAND", callback_data="action_stand")],
-        # [InlineKeyboardButton("DOUBLE DOWN", callback_data="action_double")] if can_double_down else []
-    ]
-    return InlineKeyboardMarkup(keyboard)
+    data.append(log_entry)
+    try:
+        with open(LOG_FILE, 'w') as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving log file: {e}")
 
 # --- Telegram Handlers ---
 
-async def start_game(update, context):
-    """Starts a new Blackjack game."""
+async def start_manual_input(update, context):
+    """Initiates the manual card input process."""
     user_id = update.effective_user.id
     
-    # 1. Initialize Game
-    deck = create_deck()
-    player_hand = [deal_card(deck), deal_card(deck)]
-    dealer_hand = [deal_card(deck), deal_card(deck)]
-    
-    GAME_STATE[user_id] = {
-        'player_hand': player_hand,
-        'dealer_hand': dealer_hand,
-        'deck': deck, # Store the deck state
-        'game_over': False
+    # Initialize the state for this user
+    USER_INPUT_STATE[user_id] = {
+        'step': 'SELECTING_DEALER_CARD', 
+        'player_hand': [], 
+        'dealer_hand': [], 
+        'running_count': 0,
+        'cards_logged': 0
     }
-
-    player_value = get_hand_value(player_hand)
     
-    # 2. Check for initial Blackjack
-    message, is_over = check_game_end(player_value, 0, False)
+    # If this is the first hand, start count from 0
+    # If we wanted to persist count between hands, we'd load it here.
     
-    player_display, player_value_display = get_hand_display(player_hand)
-    dealer_display, dealer_value_display = get_hand_display(dealer_hand, is_dealer_first_card_hidden=True)
-    
-    # 3. Format Message
-    game_message = (
-        "♣️ **New Blackjack Game Started!** ♦️\n\n"
-        "--- **Dealer's Hand** ---\n"
-        f"{dealer_display}\n{dealer_value_display}\n\n"
-        "--- **Your Hand** ---\n"
-        f"{player_display}\n{player_value_display}\n\n"
-    )
-    
-    keyboard = None
-    if is_over:
-        game_message += message
-    else:
-        keyboard = create_game_keyboard()
-        game_message += "Choose your action."
-
     await update.message.reply_text(
-        game_message,
-        reply_markup=keyboard,
+        "👋 **Manual Hand Logging Started!**\n\n"
+        "**Step 1:** Select the Dealer's **UP CARD** (the visible card).",
+        reply_markup=create_card_rank_keyboard(),
         parse_mode=constants.ParseMode.MARKDOWN
     )
 
-async def handle_game_action(update, context):
-    """Handles HIT and STAND actions."""
+async def handle_card_selection(update, context):
+    """Handles card button clicks and moves through the state machine."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    data = query.data.split('_')
+    
+    if len(data) != 2 or data[0] != 'rank' or user_id not in USER_INPUT_STATE:
+        await query.edit_message_text("Error: Session expired or invalid button. Use **/startgame** to begin.")
+        return
+
+    rank = data[1]
+    state = USER_INPUT_STATE[user_id]
+    
+    # Update running count and cards logged for the selected card
+    state['running_count'] = update_count(rank, state['running_count'])
+    state['cards_logged'] += 1
+    
+    current_step = state['step']
+    next_step_message = ""
+    
+    # State Machine Logic
+    if current_step == 'SELECTING_DEALER_CARD':
+        state['dealer_hand'].append(rank)
+        state['step'] = 'SELECTING_PLAYER_CARD_1'
+        next_step_message = "✅ Dealer Up Card: **{rank}**.\n\n**Step 2:** Select your **FIRST** card."
+    
+    elif current_step == 'SELECTING_PLAYER_CARD_1':
+        state['player_hand'].append(rank)
+        state['step'] = 'SELECTING_PLAYER_CARD_2'
+        next_step_message = "✅ Player Card 1: **{rank}**.\n\n**Step 3:** Select your **SECOND** card."
+        
+    elif current_step == 'SELECTING_PLAYER_CARD_2':
+        state['player_hand'].append(rank)
+        state['step'] = 'ACTION_PHASE'
+        # Proceed to the action phase without further card selection
+        await display_strategy_action(query, user_id)
+        return
+    
+    elif current_step.startswith('SELECTING_HIT_CARD'):
+        # This handles inputting the result of a 'HIT' action
+        state['player_hand'].append(rank)
+        state['step'] = 'ACTION_PHASE'
+        await display_strategy_action(query, user_id)
+        return
+        
+    await query.edit_message_text(
+        next_step_message.format(rank=rank),
+        reply_markup=create_card_rank_keyboard(),
+        parse_mode=constants.ParseMode.MARKDOWN
+    )
+
+async def handle_strategy_action(update, context):
+    """Handles the user clicking an action button (HIT, STAND, SPLIT, DOUBLE)."""
     query = update.callback_query
     await query.answer()
     
     user_id = query.from_user.id
     action = query.data.split('_')[1]
     
-    if user_id not in GAME_STATE or GAME_STATE[user_id]['game_over']:
-        await query.edit_message_text("Game over or session expired. Use **/blackjack** to start a new game.")
+    if user_id not in USER_INPUT_STATE or USER_INPUT_STATE[user_id]['step'] != 'ACTION_PHASE':
+        await query.edit_message_text("Error: Not in action phase. Use **/startgame** to begin a new hand.")
         return
 
-    state = GAME_STATE[user_id]
+    state = USER_INPUT_STATE[user_id]
     
     if action == 'hit':
-        state['player_hand'].append(deal_card(state['deck']))
-        player_value = get_hand_value(state['player_hand'])
-        
-        # Check for BUST or Blackjack
-        message, is_over = check_game_end(player_value, 0, False)
-        state['game_over'] = is_over
-        
-        # If the player is not bust/blackjack, continue the game
-        if is_over:
-            await finish_game_and_update_message(query, user_id, message)
-        else:
-            await update_game_message(query, user_id, "Choose your action.")
-            
+        state['step'] = 'SELECTING_HIT_CARD'
+        await query.edit_message_text(
+            "🃏 **ACTION: HIT**\n\nSelect the card you received.",
+            reply_markup=create_card_rank_keyboard(),
+            parse_mode=constants.ParseMode.MARKDOWN
+        )
     elif action == 'stand':
-        state['game_over'] = True
+        # End of hand. Calculate outcome and log.
+        await finish_manual_hand(query, user_id, action="STAND")
         
-        # Dealer's turn logic
-        dealer_value = get_hand_value(state['dealer_hand'])
-        while dealer_value < 17:
-            state['dealer_hand'].append(deal_card(state['deck']))
-            dealer_value = get_hand_value(state['dealer_hand'])
+    elif action == 'doubledown':
+        state['step'] = 'SELECTING_HIT_CARD' # Player gets one final card
+        # After inputting the card, the hand must end (handled in finish_manual_hand)
+        await query.edit_message_text(
+            "💰 **ACTION: DOUBLE DOWN**\n\nSelect the single card you received.",
+            reply_markup=create_card_rank_keyboard(),
+            parse_mode=constants.ParseMode.MARKDOWN
+        )
 
-        player_value = get_hand_value(state['player_hand'])
-        message, _ = check_game_end(player_value, dealer_value, True)
-        
-        await finish_game_and_update_message(query, user_id, message)
+    elif action == 'split':
+        await query.edit_message_text(
+            "✂️ **ACTION: SPLIT**\n\nSplitting logic is highly complex and not implemented in this version. Please treat this as a new hand for now or stand.",
+            reply_markup=create_strategy_keyboard(state['player_hand'], is_split_hand=True),
+            parse_mode=constants.ParseMode.MARKDOWN
+        )
 
-async def update_game_message(query, user_id, status_message):
-    """Updates the game message without ending the game."""
-    state = GAME_STATE[user_id]
+
+async def display_strategy_action(query, user_id):
+    """Displays the current hand, count, recommendation, and action buttons."""
+    state = USER_INPUT_STATE[user_id]
+    player_value = get_hand_value(state['player_hand'])
     
-    player_display, player_value_display = get_hand_display(state['player_hand'])
-    dealer_display, dealer_value_display = get_hand_display(state['dealer_hand'], is_dealer_first_card_hidden=True)
+    # 1. Check for Bust/Blackjack immediately
+    if player_value > 21:
+        await finish_manual_hand(query, user_id, outcome_override="💥 BUST! Your hand value is over 21.")
+        return
+    if player_value == 21 and len(state['player_hand']) <= 2:
+        await finish_manual_hand(query, user_id, outcome_override="🎉 BLACKJACK! This hand is complete.")
+        return
+        
+    # 2. Strategy Calculation
+    true_count = calculate_true_count(state['running_count'], state['cards_logged'])
+    dealer_up_card = state['dealer_hand'][0]
+    recommendation = recommend_action(state['player_hand'], dealer_up_card, true_count)
+    
+    # 3. Message Formatting
+    player_hand_display = ' | '.join(state['player_hand'])
+    dealer_up_display = state['dealer_hand'][0]
     
     game_message = (
-        "♣️ **Blackjack Game in Progress** ♦️\n\n"
-        "--- **Dealer's Hand** ---\n"
-        f"{dealer_display}\n{dealer_value_display}\n\n"
-        "--- **Your Hand** ---\n"
-        f"{player_display}\n{player_value_display}\n\n"
-        f"**Status:** {status_message}"
+        "👑 **Blackjack Strategy Coach** 🃏\n"
+        "--------------------------------------\n"
+        f"Cards Logged: **{state['cards_logged']}**\n"
+        f"True Count (Hi-Lo): **{true_count}** (Running: {state['running_count']})\n"
+        "--------------------------------------\n"
+        f"Dealer Up Card: **{dealer_up_display}**\n"
+        f"Your Hand ({player_value}): **{player_hand_display}**\n\n"
+        f"💡 **Recommended Action:** `{recommendation}`\n"
     )
     
     await query.edit_message_text(
         game_message,
-        reply_markup=create_game_keyboard(),
+        reply_markup=create_strategy_keyboard(state['player_hand']),
         parse_mode=constants.ParseMode.MARKDOWN
     )
 
-async def finish_game_and_update_message(query, user_id, outcome_message):
-    """Updates the message when the game ends."""
-    state = GAME_STATE.pop(user_id) # Remove state now that game is over
+def create_strategy_keyboard(player_hand, is_split_hand=False):
+    """Creates the action keyboard (Hit, Stand, Double Down, Split) dynamically."""
     
-    player_display, player_value_display = get_hand_display(state['player_hand'])
-    dealer_display, dealer_value_display = get_hand_display(state['dealer_hand'], is_dealer_first_card_hidden=False) # Show all cards
+    is_initial_deal = len(player_hand) == 2 and not is_split_hand
+    can_split = is_initial_deal and (player_hand[0] == player_hand[1])
 
-    game_message = (
-        "♠️ **GAME OVER** ♠️\n\n"
-        "--- **Dealer's Final Hand** ---\n"
-        f"{dealer_display}\n{dealer_value_display}\n\n"
-        "--- **Your Final Hand** ---\n"
-        f"{player_display}\n{player_value_display}\n\n"
-        f"👑 **RESULT: {outcome_message}**\n\n"
-        "Use **/blackjack** to play again!"
+    keyboard = [
+        [InlineKeyboardButton("➕ HIT", callback_data="action_hit"),
+         InlineKeyboardButton("🛑 STAND", callback_data="action_stand")]
+    ]
+    
+    # Only allow Double Down and Split on the initial two cards
+    if is_initial_deal:
+        keyboard.append([InlineKeyboardButton("DOUBLE DOWN 💰", callback_data="action_doubledown")])
+    
+    if can_split:
+         keyboard.append([InlineKeyboardButton("SPLIT ✂️", callback_data="action_split")])
+
+    return InlineKeyboardMarkup(keyboard)
+
+async def finish_manual_hand(query, user_id, action=None, outcome_override=None):
+    """Finalizes the hand, calculates results, logs, and resets state."""
+    state = USER_INPUT_STATE.pop(user_id) # Game is over, remove state
+    
+    # Calculate final outcome message
+    if outcome_override:
+        outcome_message = outcome_override
+    else:
+        outcome_message = f"Hand completed after action: **{action.upper()}**."
+        
+    # Log the result
+    log_hand_result(user_id, state, outcome_message) 
+
+    # Final Display
+    player_hand_display = ' | '.join(state['player_hand'])
+    dealer_up_display = state['dealer_hand'][0]
+    player_value = get_hand_value(state['player_hand'])
+    
+    final_message = (
+        "♠️ **HAND COMPLETED** ♠️\n"
+        "--------------------------------------\n"
+        f"**LOGGED RESULT:** {outcome_message}\n"
+        "--------------------------------------\n"
+        f"Dealer Up Card: **{dealer_up_display}**\n"
+        f"Your Final Hand ({player_value}): **{player_hand_display}**\n\n"
+        f"Current Running Count: {state['running_count']}\n"
+        f"Use **/{START_GAME_COMMAND}** to log the next hand!"
     )
 
     await query.edit_message_text(
-        game_message,
+        final_message,
         reply_markup=None,
         parse_mode=constants.ParseMode.MARKDOWN
     )
@@ -246,19 +372,18 @@ async def finish_game_and_update_message(query, user_id, outcome_message):
 
 def main():
     """Starts the bot."""
-    # Note: No data.json logic is needed for this pure Blackjack simulation
     
     application = ApplicationBuilder().token(TOKEN).build()
 
-    # Register handlers
-    # /start is a good default, but /blackjack is clearer
-    application.add_handler(CommandHandler("start", start_game)) 
-    application.add_handler(CommandHandler("blackjack", start_game))
+    # Commands
+    application.add_handler(CommandHandler("start", start_manual_input)) 
+    application.add_handler(CommandHandler(START_GAME_COMMAND, start_manual_input))
     
-    # Action handler for HIT/STAND buttons
-    application.add_handler(CallbackQueryHandler(handle_game_action, pattern="^action_"))
+    # Callbacks
+    application.add_handler(CallbackQueryHandler(handle_card_selection, pattern="^rank_"))
+    application.add_handler(CallbackQueryHandler(handle_strategy_action, pattern="^action_"))
 
-    print("Blackjack Bot is running... Press Ctrl+C to stop.")
+    print("Manual Blackjack Strategy Bot is running... Press Ctrl+C to stop.")
     application.run_polling()
 
 if __name__ == '__main__':
