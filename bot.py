@@ -6,16 +6,16 @@ import json
 import os
 from itertools import combinations
 import re 
-import asyncio # Imported for better asynchronous practice, though not strictly needed for this specific logic
+import asyncio # Library is asynchronous, so this import is good practice
 
-# --- Configuration ---
-# BEST PRACTICE: Load TOKEN from environment variable for security.
-# Fallback is only for quick testing.
+# --- Configuration & Security ---
+# Load TOKEN from environment variable for production (Best Practice). 
+# Fallback is for testing only.
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8103644321:AAFDyGgp2G-0TXDkMV8iXY4VuGg5iYY7H-M') 
 DATA_FILE = 'data.json'
 SIX_COLORS = ['🔵 Blue', '🔴 Red', '🟢 Green', '🟡 Yellow', '⚪ White', '🌸 Pink']
 ROLLS_PER_GAME = 3 
-BUTTON_TEXT = "View Detailed Report"
+BUTTON_TEXT = "View External Report" # Renamed for clarity on what the link does
 
 # --- State Management ---
 # Tracks the user's current roll: {user_id: [color_1, color_2, color_3]}
@@ -28,9 +28,7 @@ def load_data():
     default_data = {
         "history": [],
         "color_counts": {color: 0 for color in SIX_COLORS},
-        # Store configuration data here
         "config": {
-            # --- DEFAULT URL ---
             "analysis_url_base": "https://queenking.ph/game/play/STUDIO-CGM-CGM002-by-we", 
             "username": "09925345945", 
             "password": "Shiwashi21"    
@@ -41,7 +39,7 @@ def load_data():
     try:
         with open(DATA_FILE, 'r') as f:
             data = json.load(f)
-            # Ensure all necessary keys exist (for old data files)
+            # Ensure all necessary keys exist (robust loading)
             data.setdefault('config', default_data['config'])
             data.setdefault('color_counts', default_data['color_counts'])
             for key in default_data['config']:
@@ -67,7 +65,7 @@ def update_data_with_roll(rolled_colors, data):
         data['color_counts'][color] += 1
     save_data(data)
 
-# --- Analysis Functions (Unchanged) ---
+# --- Analysis & Utility Functions ---
 
 def create_color_keyboard(roll_number):
     """Creates the inline keyboard with color buttons."""
@@ -95,7 +93,6 @@ def analyze_patterns(data):
     least_likely = sorted_probs[0]
     most_likely = sorted_probs[-1]
     
-    # Format all counts for a clearer view
     count_details = "\n".join([f"- {color}: {count} hits" for color, count in sorted(data['color_counts'].items())])
 
     full_history_msg = (
@@ -156,31 +153,22 @@ def predict_combinations(data):
     if not pair_counts:
           color_B, color_C = most_frequent_color, most_frequent_color
     else:
-        # Find the most frequent pair
         most_frequent_pair = max(pair_counts, key=pair_counts.get)
         color_B, color_C = most_frequent_pair
         
-    # Prediction strategies based on frequent individual color and frequent pair
-    
-    # P1: Mix - Most Frequent Pair + Most Frequent Individual Color
     prediction_1 = [color_B, color_C, most_frequent_color]
-    random.shuffle(prediction_1) # Shuffle for less predictable display
+    random.shuffle(prediction_1) 
     
-    # P2: Double - Most Frequent Pair + One color from the pair repeated
-    # Ensure prediction_2 has 3 elements, even if B==C
     prediction_2_base = [color_B, color_C] 
     if color_B == color_C:
-        # If the most frequent pair is actually a double of the same color (e.g., Red, Red), 
-        # use the next most frequent color or a default for the third.
         sorted_counts = sorted(color_counts.items(), key=lambda item: item[1], reverse=True)
         third_color = sorted_counts[1][0] if len(sorted_counts) > 1 else SIX_COLORS[0]
         prediction_2 = [color_B, color_C, third_color]
     else:
-        prediction_2 = [color_B, color_C, color_B] # Double one of the pair members
+        prediction_2 = [color_B, color_C, color_B] 
         
-    random.shuffle(prediction_2) 
+    random.shuffle(prediction_2)  
     
-    # P3: Jackpot - Triple Most Frequent Color
     prediction_3 = [most_frequent_color, most_frequent_color, most_frequent_color]
 
     pred1_str = ' | '.join(prediction_1)
@@ -224,7 +212,7 @@ def format_last_15_rolls(data):
 
 async def reset_history(update, context):
     """Resets all recorded history and counts."""
-    initial_data = load_data() # Load to preserve config
+    initial_data = load_data() 
     initial_data['history'] = []
     initial_data['color_counts'] = {color: 0 for color in SIX_COLORS}
     save_data(initial_data)
@@ -300,7 +288,7 @@ async def set_credentials(update, context):
     )
 
 async def start_roll(update, context):
-    """Starts the 3-dice color selection process via buttons. This is used by both /roll and /predict."""
+    """Starts the 3-dice color selection process via buttons. This is used by /roll, /predict, and the new button callback."""
     user_id = update.effective_user.id
     
     USER_ROLL_STATE[user_id] = [None, None, None]
@@ -313,23 +301,39 @@ async def start_roll(update, context):
         parse_mode=constants.ParseMode.MARKDOWN
     )
 
+async def start_roll_from_callback(update, context):
+    """Handles the 'start_new_roll' callback from the button to initiate the /roll sequence."""
+    query = update.callback_query
+    await query.answer("Starting new roll sequence...")
+    
+    user_id = query.from_user.id
+    USER_ROLL_STATE[user_id] = [None, None, None]
+    keyboard = create_color_keyboard(roll_number=1)
+    
+    # Edit the message to start the roll sequence
+    await query.edit_message_text(
+        "🎲 **Roll 1 of 3:** Please select the color for the first die.",
+        reply_markup=keyboard,
+        parse_mode=constants.ParseMode.MARKDOWN
+    )
+
 async def handle_color_callback(update, context):
     """Handles color selection button clicks and tracks state."""
     query = update.callback_query
-    # Immediate answer to prevent loading spinner, ensures responsiveness
+    # Immediate answer to prevent loading spinner (0 delay user experience)
     await query.answer() 
     
     user_id = query.from_user.id
     data = query.data.split('_')
     
-    if len(data) != 3 or user_id not in USER_ROLL_STATE:
-        await query.edit_message_text("Error: Roll session timed out or invalid data. Use /roll or /predict to start again.")
-        return
+    # Check if this is a color selection callback
+    if data[0] != 'roll' or user_id not in USER_ROLL_STATE:
+        # If it's not a color roll callback (e.g., if it's "start_new_roll"), it's handled by another function.
+        return 
 
     roll_number = int(data[1])
     selected_color = data[2] 
     
-    # Map back to full color name (e.g., 'Blue' -> '🔵 Blue')
     full_color_name = next((c for c in SIX_COLORS if selected_color in c), None)
     
     USER_ROLL_STATE[user_id][roll_number - 1] = full_color_name
@@ -345,13 +349,11 @@ async def handle_color_callback(update, context):
         coldness_analysis = find_coldest_color(game_data)
         combination_analysis = predict_combinations(game_data)
 
-        # 1. Extract the Best Prediction Summary (similar to /analyze)
+        # 1. Extract the Best Prediction Summary
         best_prediction_summary = "Prediction not yet available (Need 10+ rolls)."
         if len(game_data['history']) >= 10:
             try:
-                # Safely extract the P1 prediction line from combination analysis
                 p1_line = next(line for line in combination_analysis.split('\n') if line.startswith('🥇 **P1 (Mix):**'))
-                # Clean up the string to just show the combination
                 best_prediction_summary = re.sub(r'🥇 \*\*P1 \(Mix\):\*\* `(.*?)`.*', r'\1', p1_line).strip()
             except StopIteration:
                 pass 
@@ -365,11 +367,16 @@ async def handle_color_callback(update, context):
             
             f"{individual_analysis}\n\n"
             f"{coldness_analysis}\n"
-            f"{combination_analysis}" # This includes the P1/P2/P3 breakdown
+            f"{combination_analysis}" 
         )
+        
+        # 3. ADD THE NEW BUTTON to start the next roll
+        keyboard = [[InlineKeyboardButton("Submit Next Roll / Predict", callback_data="start_new_roll")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(
             full_analysis_message,
+            reply_markup=reply_markup, 
             parse_mode=constants.ParseMode.MARKDOWN
         )
         return
@@ -396,7 +403,6 @@ async def get_analysis_only(update, context):
     
     # 1. CONSTRUCT THE AUTHENTICATED URL
     if username and password:
-        # Use regex to split only after the protocol to correctly insert credentials
         if '://' in base_url:
             protocol_match = re.match(r"^(https?://|ftp://)", base_url)
             if protocol_match:
@@ -404,10 +410,8 @@ async def get_analysis_only(update, context):
                 domain_path = base_url[len(protocol):]
                 analysis_url = f"{protocol}{username}:{password}@{domain_path}"
             else:
-                 # Fallback for unexpected URL formats
                 analysis_url = f"https://{username}:{password}@{base_url}"
         else:
-            # Fallback for URLs without explicit protocol
             analysis_url = f"https://{username}:{password}@{base_url}"
         
         url_status = f"🔐 Link generated with saved credentials."
@@ -427,9 +431,7 @@ async def get_analysis_only(update, context):
     best_prediction_summary = "Prediction not yet available (Need 10+ rolls)."
     if len(data['history']) >= 10:
         try:
-            # Safely extract the P1 prediction line from combination analysis
             p1_line = next(line for line in combination_analysis.split('\n') if line.startswith('🥇 **P1 (Mix):**'))
-            # Clean up the string to just show the combination
             best_prediction_summary = re.sub(r'🥇 \*\*P1 \(Mix\):\*\* `(.*?)`.*', r'\1', p1_line).strip()
         except StopIteration:
             pass 
@@ -447,8 +449,13 @@ async def get_analysis_only(update, context):
         f"{url_status}"
     )
 
-    # 6. Create the Inline Keyboard button
-    keyboard = [[InlineKeyboardButton(BUTTON_TEXT, url=analysis_url)]]
+    # 6. Create the Inline Keyboard button (Report and Next Roll)
+    keyboard = [
+        # Existing row for the external report link
+        [InlineKeyboardButton(BUTTON_TEXT, url=analysis_url)],
+        # NEW ROW for submitting the next roll
+        [InlineKeyboardButton("Submit Next Roll / Predict", callback_data="start_new_roll")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
@@ -461,23 +468,26 @@ async def get_analysis_only(update, context):
 
 def main():
     """Starts the bot."""
-    # Ensure data.json exists and is initialized with defaults
     if not os.path.exists(DATA_FILE):
         save_data(load_data())
     
-    # The ApplicationBuilder handles networking, using appropriate asynchronous calls
-    # for immediate request/response without introducing artificial delays.
+    # application.run_polling() handles the polling loop with no unnecessary delay
     application = ApplicationBuilder().token(TOKEN).build()
 
-    # Register handlers
+    # Register command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("roll", start_roll))
     application.add_handler(CommandHandler("predict", start_roll))
-    application.add_handler(CallbackQueryHandler(handle_color_callback))
     application.add_handler(CommandHandler("analyze", get_analysis_only))
     application.add_handler(CommandHandler("setbaseurl", set_analysis_base_url)) 
     application.add_handler(CommandHandler("setcreds", set_credentials)) 
     application.add_handler(CommandHandler("reset", reset_history))
+
+    # Register callback handlers
+    # This handles the "Submit Next Roll" button from the analysis screens
+    application.add_handler(CallbackQueryHandler(start_roll_from_callback, pattern="^start_new_roll$")) 
+    # This handles all the individual color selection clicks (roll_1_color, roll_2_color, etc.)
+    application.add_handler(CallbackQueryHandler(handle_color_callback)) 
 
     print("Color Dice Roll Predictor Bot is running... Press Ctrl+C to stop.")
     application.run_polling()
